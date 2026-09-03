@@ -1,0 +1,6 @@
+[submodule "tools/daemons"]
+	path = tools/daemons
+	url = git@github.com:tuan-cre/service-daemons.git
+[submodule "tools/wifi"]
+	path = tools/wifi
+	url = git@github.com:tuan-cre/wifi-tui.git

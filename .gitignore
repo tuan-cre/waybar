@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.venv/
+venv/
+env/
+ENV/
+
+# Caches
+.diskcache/
+.cache/
+.mypy_cache/
+.pytest_cache/
+.pyre/
+.ruff_cache/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+*.bak
+.idea/
+.vscode/
+
+# Waybar / Hyprland
+# Playwright MCP dumps
+scripts/.playwright-mcp/
+tools/*/__pycache__/
+tools/*/.venv/
+tools/wifi/.diskcache/
+
+# Logs
+*.log

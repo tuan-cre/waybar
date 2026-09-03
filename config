@@ -1,0 +1,152 @@
+{
+  "layer": "top",
+  "position": "top",
+  "margin-top": 0,
+  "margin-bottom": -10,
+  "spacing": 0,
+
+  "modules-left": [
+    "hyprland/workspaces",
+    "custom/memory",
+    "cpu",
+    "wlr/taskbar"
+  ],
+
+  "modules-center": [
+    "clock",
+    "custom/gcal"
+  ],
+
+  "modules-right": [
+    "custom/audacious",
+    "custom/vis",
+    "custom/daemons",
+    "tray",
+    "network",
+    "pulseaudio",
+    "battery"
+  ],
+
+  "hyprland/workspaces": {
+    "format": "{name}:{icon}",
+    "format-icons": {
+      "active": "",
+      "default": ""
+    }
+  },
+
+  "clock": {
+  "timezone": "Asia/Ho_Chi_Minh",
+  "tooltip": false,
+  "format": "{:%H:%M:%S - %A, %d}",
+  "interval": 1
+  },
+
+  "custom/gcal": {
+    "exec": "~/.config/waybar/tools/gcal/gcal.sh",
+    "signal": 1,
+    "return-type": "json",
+    "on-click": "~/.config/waybar/tools/gcal/gcal_click.sh left",
+    "on-click-right": "~/.config/waybar/tools/gcal/gcal_click.sh right",
+    "on-click-middle": "~/.config/waybar/tools/gcal/gcal_click.sh middle"
+  },
+
+"network": {
+    "format-wifi": " ",
+    "format-ethernet": "󰈀 ",
+    "format-disconnected": "󰤠 ",
+    "interval": 5,
+    "tooltip-format": "{essid} ({signalStrength}%)",
+    "on-click": "foot --app-id=wifi-tui -e ~/.config/waybar/tools/wifi/.venv/bin/python ~/.config/waybar/tools/wifi/wifitui_curses.py"
+  },
+
+
+  "cpu": {
+"interval": 2,
+    //"format": " {usage:>2}%",
+    "format": " {usage:2>}%",
+    "on-click": "foot --app-id=btop -e btop"
+  },
+
+  "custom/memory": {
+    "exec": "~/.config/waybar/scripts/mem_used.sh",
+"interval": 1,
+    "format": " {}",
+    "tooltip": false
+  },
+
+  "pulseaudio": {
+    "format": "{icon} {volume}%",
+    "format-muted": "",
+    "format-icons": {
+      "default": ["", "", " "]
+    },
+    "on-click": "GSK_RENDERER=opengl pavucontrol"
+  },
+
+  "battery": {
+    "format": "{icon} {capacity}%",
+    "format-icons": [
+      "󰁺",
+      "󰁻",
+      "󰁼",
+      "󰁽",
+      "󰁾",
+      "󰁿",
+      "󰂀",
+      "󰂁",
+      "󰂂",
+      "󰁹"
+    ],
+    "on-click": "~/.config/waybar/scripts/battery_click.sh left",
+    "on-click-right": "foot --app-id=battery ~/.config/waybar/scripts/battery_click.sh right"
+  },
+
+  "tray": {
+    "icon-size": 15,
+    "spacing": 10,
+    "show-passive-items": false,
+    "reverse-direction": false
+  },
+
+  "wlr/taskbar": {
+    "format": "{icon}",
+    "icon-size": 14,
+    "icon-theme": "Papirus",
+    "all-outputs": false,
+  "tooltip": true,
+  "tooltip-format": "{tooltip}",
+    "tooltip-format": "{name}",
+    "on-click": "activate",
+    "on-click-middle": "close"
+  },
+
+"custom/audacious": {
+  "exec": "~/.config/waybar/scripts/audacious_status.sh",
+  "interval": 1,
+  "exec-if": "pgrep -x audacious",
+  "return-type": "json",
+  "format": "{}",
+  "tooltip": true,
+  "on-click": "audacious --play-pause",
+  "on-click-right": "killall audacious",
+  "on-scroll-up": "audacious --rew",
+  "on-scroll-down": "audacious --fwd"
+},
+
+  "custom/vis": {
+    //"exec": "~/.local/bin/waybar-vis -b 12 -s 1.0 -d 0.995",
+    "exec": "~/.config/waybar/tools/vis/waybar-vis -b 12 -s 1.0 -d 0.98",
+    "tail": true,
+    "return-type": "json",
+    "format": "{}",
+    "tooltip": true
+  },
+
+  "custom/daemons": {
+    "exec": "~/.config/waybar/tools/daemons/daemons_waybar.sh",
+    "signal": 1,
+    "on-click": "~/.config/waybar/tools/daemons/daemons_click.sh",
+    "return-type": "json"
+  }
+}
