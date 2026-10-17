@@ -1,8 +1,9 @@
 {
   "layer": "top",
+  "output": "eDP-1",
   "position": "top",
   "margin-top": 0,
-  "margin-bottom": -10,
+  "margin-bottom": 0,
   "spacing": 0,
 
   "modules-left": [
@@ -14,7 +15,8 @@
 
   "modules-center": [
     "clock",
-    "custom/gcal"
+    "custom/gcal",
+    "custom/openrouter"
   ],
 
   "modules-right": [
@@ -28,7 +30,9 @@
   ],
 
   "hyprland/workspaces": {
+    "all-outputs": true,
     "format": "{name}:{icon}",
+    "tooltip": false,
     "format-icons": {
       "active": "",
       "default": ""
@@ -36,14 +40,16 @@
   },
 
   "clock": {
-  "timezone": "Asia/Ho_Chi_Minh",
-  "tooltip": false,
-  "format": "{:%H:%M:%S - %A, %d}",
-  "interval": 1
+    "timezone": "Asia/Ho_Chi_Minh",
+    "tooltip": false,
+    "format": "{:%H:%M:%S - %A, %d}",
+    "interval": 1,
+    "on-click": "~/.config/waybar/tools/gcal/gcal_click.sh left"
   },
 
   "custom/gcal": {
     "exec": "~/.config/waybar/tools/gcal/gcal.sh",
+    "interval": 300,
     "signal": 1,
     "return-type": "json",
     "on-click": "~/.config/waybar/tools/gcal/gcal_click.sh left",
@@ -51,28 +57,28 @@
     "on-click-middle": "~/.config/waybar/tools/gcal/gcal_click.sh middle"
   },
 
-"network": {
+  "network": {
     "format-wifi": " ",
     "format-ethernet": "󰈀 ",
     "format-disconnected": "󰤠 ",
     "interval": 5,
     "tooltip-format": "{essid} ({signalStrength}%)",
-    "on-click": "foot --app-id=wifi-tui -e ~/.config/waybar/tools/wifi/.venv/bin/python ~/.config/waybar/tools/wifi/wifitui_curses.py"
+    "on-click": "footclient -E --app-id=wifi-tui -e ~/.config/waybar/tools/wifi/.venv/bin/python ~/.config/waybar/tools/wifi/wifitui_curses.py"
   },
 
-
   "cpu": {
-"interval": 2,
-    //"format": " {usage:>2}%",
+    "interval": 2,
     "format": " {usage:2>}%",
-    "on-click": "foot --app-id=btop -e btop"
+    "on-click": "footclient -E --app-id=btop -e btop"
   },
 
   "custom/memory": {
     "exec": "~/.config/waybar/scripts/mem_used.sh",
-"interval": 1,
+    "interval": 1,
     "format": " {}",
-    "tooltip": false
+    "return-type": "json",
+    "tooltip": true,
+    "on-click": "footclient -E --app-id=btop -e btop"
   },
 
   "pulseaudio": {
@@ -81,7 +87,8 @@
     "format-icons": {
       "default": ["", "", " "]
     },
-    "on-click": "GSK_RENDERER=opengl pavucontrol"
+    "on-click": "GSK_RENDERER=opengl pavucontrol",
+    "on-click-right": "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"
   },
 
   "battery": {
@@ -98,8 +105,8 @@
       "󰂂",
       "󰁹"
     ],
-    "on-click": "~/.config/waybar/scripts/battery_click.sh left",
-    "on-click-right": "foot --app-id=battery ~/.config/waybar/scripts/battery_click.sh right"
+    "on-click": "~/.config/waybar/tools/battery/battery_click.sh left",
+    "on-click-right": "~/.config/waybar/tools/battery/battery_click.sh right"
   },
 
   "tray": {
@@ -114,30 +121,30 @@
     "icon-size": 14,
     "icon-theme": "Papirus",
     "all-outputs": false,
-  "tooltip": true,
-  "tooltip-format": "{tooltip}",
+    "tooltip": true,
     "tooltip-format": "{name}",
     "on-click": "activate",
     "on-click-middle": "close"
   },
 
-"custom/audacious": {
-  "exec": "~/.config/waybar/scripts/audacious_status.sh",
-  "interval": 1,
-  "exec-if": "pgrep -x audacious",
-  "return-type": "json",
-  "format": "{}",
-  "tooltip": true,
-  "on-click": "audacious --play-pause",
-  "on-click-right": "killall audacious",
-  "on-scroll-up": "audacious --rew",
-  "on-scroll-down": "audacious --fwd"
-},
+  "custom/audacious": {
+    "exec": "~/.config/waybar/scripts/audacious_status.sh",
+    "interval": 1,
+    "signal": 2,
+    "exec-if": "audtool --playback-status 2>/dev/null | grep -Eq '^(playing|paused)$'",
+    "return-type": "json",
+    "format": "{}",
+    "tooltip": true,
+    "on-click": "audacious --play-pause",
+    "on-click-right": "killall audacious",
+    "on-scroll-up": "audacious --rew",
+    "on-scroll-down": "audacious --fwd"
+  },
 
   "custom/vis": {
-    //"exec": "~/.local/bin/waybar-vis -b 12 -s 1.0 -d 0.995",
-    "exec": "~/.config/waybar/tools/vis/waybar-vis -b 12 -s 1.0 -d 0.98",
+    "exec": "~/.config/waybar/tools/vis/waybar-vis -b 12 -r 60 -s 1.0 -d 0.98",
     "tail": true,
+    "restart-interval": 2,
     "return-type": "json",
     "format": "{}",
     "tooltip": true
@@ -145,8 +152,18 @@
 
   "custom/daemons": {
     "exec": "~/.config/waybar/tools/daemons/daemons_waybar.sh",
-    "signal": 1,
+    "signal": 3,
     "on-click": "~/.config/waybar/tools/daemons/daemons_click.sh",
     "return-type": "json"
+  },
+
+  "custom/openrouter": {
+    "exec": "~/.config/waybar/scripts/openrouter.sh",
+    "interval": 30,
+    "signal": 5,
+    "return-type": "json",
+    "format": "{}",
+    "tooltip": true,
+    "on-click": "xdg-open https://openrouter.ai/activity"
   }
 }

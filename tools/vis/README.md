@@ -7,7 +7,7 @@ Captures system audio via PipeWire, runs FFT analysis, and outputs Unicode block
 ## Dependencies
 
 - `pipewire` (libpipewire-0.3)
-- `fftw` or built-in FFT (see `fft.c`)
+- Built-in FFT (see `fft.c`)
 - `waybar` (for display)
 
 ## Build
@@ -71,8 +71,8 @@ The `.hidden` class is applied automatically when no audio is playing.
 1. Captures audio from the system audio sink via PipeWire
 2. Maintains a ring buffer of PCM samples
 3. On each timer tick, runs FFT and splits frequencies into logarithmic-scale bands
-4. Smooths values with attack/decay for a fluid visual
+4. Applies immediate attack and smoothed decay for a fluid visual
 5. Outputs JSON with Unicode block characters (▁▂▃▄▅▆▇█)
-6. Auto-hides after 8 consecutive silent frames
+6. Auto-hides as soon as audio falls below the silence threshold
 7. Auto-sensitivity normalizes bars to full range regardless of volume
 8. Supports multiple instances with `-c class` for different CSS styles

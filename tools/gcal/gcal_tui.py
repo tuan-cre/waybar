@@ -7,17 +7,20 @@ Arrow keys to navigate, q to quit.
 
 import calendar
 import curses
-import functools
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 GCALCLI = os.path.expanduser("~/.local/bin/gcalcli")
+API_HELPER = Path(__file__).with_name("gcal_api.py")
+GCALCLI_PYTHON = Path.home() / ".local/share/pipx/venvs/gcalcli/bin/python"
 
 # ── Theme (Void — same as _template) ─────────────────────────────────
 # Color pair indices — keep template mapping: ACCENT=magenta #b48ead, etc.
@@ -31,9 +34,14 @@ C_BORDER = 7    # muted #5c5c6e
 C_HELP = 8      # muted
 C_DAY_NUM = 9 # bright white
 
-APP_DIR = Path(__file__).resolve().parent
 CACHE_FILE = Path.home() / ".cache" / "gcalcli" / "events_cache.json"
 ERROR_LOG = Path("/tmp/gcal_tui_error.log")
+CACHE_LOCK = threading.RLock()
+CACHE_TTL = 300
+_fetching = set()
+_refetch = set()
+_fetch_errors = set()
+_fetched_at = {}
 
 
 def _ym_key(year, month):
@@ -45,24 +53,81 @@ def _ym_from_key(key):
     return int(y), int(m)
 
 
+def normalize_event(event):
+    if not isinstance(event, (list, tuple)):
+        return None
+    if len(event) == 3:
+        event_id, calendar_name, start_time, title, all_day = None, None, *event
+    elif len(event) == 4:
+        event_id, start_time, title, all_day = event
+        calendar_name = None
+    elif len(event) == 5:
+        event_id, calendar_name, start_time, title, all_day = event
+    else:
+        return None
+    if (event_id is not None and not isinstance(event_id, str)
+            or calendar_name is not None and not isinstance(calendar_name, str)
+            or not isinstance(start_time, str) or not isinstance(title, str)
+            or type(all_day) is not bool):
+        return None
+    return (event_id or None, calendar_name or None,
+            start_time, title, all_day)
+
+
 def load_cache():
     """Read events_cache.json from disk, return {ym_key: events_dict} or {}."""
     if not CACHE_FILE.exists():
         return {}
     try:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            cache = json.load(f)
     except (json.JSONDecodeError, OSError):
         return {}
+    if not isinstance(cache, dict):
+        return {}
+    valid = {}
+    for key, days in cache.items():
+        try:
+            year, month = _ym_from_key(key)
+        except (AttributeError, ValueError, TypeError):
+            continue
+        if not 1 <= month <= 12 or not 1 <= year <= 9999:
+            continue
+        if not isinstance(days, dict):
+            continue
+        valid[key] = {}
+        for day, events in days.items():
+            try:
+                day_num = int(day)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= day_num <= calendar.monthrange(year, month)[1] and isinstance(events, list):
+                valid[key][str(day_num)] = [
+                    normalized for event in events
+                    if (normalized := normalize_event(event)) is not None
+                ]
+    return valid
 
 
 def save_cache(cache):
     """Atomically write cache dict to disk."""
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CACHE_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cache, f, separators=(",", ":"))
-    tmp.replace(CACHE_FILE)
+    tmp = None
+    try:
+        with CACHE_LOCK, tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=CACHE_FILE.parent, delete=False
+        ) as f:
+            tmp = Path(f.name)
+            json.dump(cache, f, separators=(",", ":"))
+        tmp.replace(CACHE_FILE)
+    finally:
+        if tmp:
+            tmp.unlink(missing_ok=True)
+
+
+def save_cache_snapshot(events_cache):
+    with CACHE_LOCK:
+        save_cache({_ym_key(*ym): events for ym, events in events_cache.items()})
 
 
 def init_colors():
@@ -84,72 +149,123 @@ def init_colors():
 def fetch_events(year, month):
     """Fetch events for a given month via gcalcli TSV output.
 
-    Returns dict: {day: [(start_time, title, is_all_day), ...]}
+    Returns dict: {day: [(id, calendar, time, title, all_day), ...]} or None.
     """
     last_day = calendar.monthrange(year, month)[1]
     start_str = f"{year:04d}-{month:02d}-01"
-    end_str = f"{year:04d}-{month:02d}-{last_day:02d}"
+    end_str = (date(year, month, last_day) + timedelta(days=1)).isoformat()
 
     try:
         result = subprocess.run(
             [GCALCLI, "--nocolor", "agenda", "--tsv", "--military",
+             "--details=id", "--details=calendar",
              start_str, end_str],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode != 0:
-            return {}
+            return None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return {}
+        return None
 
     events = defaultdict(list)
-    lines = result.stdout.strip().split("\n")
-    if len(lines) < 2:
-        return events
+    lines = result.stdout.splitlines()
+    if not lines:
+        return None
+    columns = {name: i for i, name in enumerate(lines[0].split("\t"))}
+    if not {"id", "calendar", "start_date", "start_time", "end_date",
+            "end_time", "title"} <= columns.keys():
+        return None
 
     for line in lines[1:]:
         if not line.strip():
             continue
         parts = line.split("\t")
-        if len(parts) < 5:
+        if len(parts) <= max(columns.values()):
             continue
 
-        start_date, start_time, *_rest = parts
+        start_date = parts[columns["start_date"]]
+        start_time = parts[columns["start_time"]]
         try:
-            day = int(start_date.split("-")[2])
-        except (IndexError, ValueError):
+            event_start = date.fromisoformat(start_date)
+            event_end = date.fromisoformat(parts[columns["end_date"]])
+        except ValueError:
             continue
 
-        title = parts[4]
+        title = parts[columns["title"]]
         if not title.strip():
             continue
 
-        is_all_day = (not start_time or start_time.strip() == ""
-                      or start_time.strip() == "00:00")
-        events[day].append((start_time.strip(), title.strip(), is_all_day))
+        is_all_day = not start_time.strip()
+        end_time = parts[columns["end_time"]].strip()
+        end_exclusive = event_end + timedelta(days=1) if end_time and end_time != "00:00" else event_end
+        day = max(event_start, date(year, month, 1))
+        month_end = date(year, month, last_day) + timedelta(days=1)
+        end_exclusive = min(end_exclusive, month_end)
+        event = (parts[columns["id"]], parts[columns["calendar"]],
+                 start_time.strip(), title.strip(), is_all_day)
+        while day < end_exclusive:
+            events[day.day].append(event)
+            day += timedelta(days=1)
 
     return dict(events)
 
 
 def bg_fetch(events_cache, year, month):
     """Fetch events in background thread and store in shared cache."""
-    events_cache[(year, month)] = fetch_events(year, month)
-    disk = {_ym_key(*ym): ev for ym, ev in events_cache.items()}
-    save_cache(disk)
+    ym = (year, month)
+    try:
+        fetched = fetch_events(year, month)
+        with CACHE_LOCK:
+            if fetched is None:
+                _fetch_errors.add(ym)
+            else:
+                events_cache[ym] = fetched
+                _fetched_at[ym] = time.monotonic()
+                _fetch_errors.discard(ym)
+                save_cache({_ym_key(*key): value
+                            for key, value in events_cache.items()})
+    except Exception:
+        with CACHE_LOCK:
+            _fetch_errors.add(ym)
+    finally:
+        with CACHE_LOCK:
+            _fetching.discard(ym)
+            if ym in _refetch:
+                _refetch.discard(ym)
+                _launch_bg_fetch_locked(events_cache, ym)
 
 
-def start_bg_fetch(events_cache, year, month):
-    """Fire off a background fetch if the month isn't cached yet.
+def _launch_bg_fetch_locked(events_cache, ym):
+    _fetch_errors.discard(ym)
+    _fetching.add(ym)
+    threading.Thread(target=bg_fetch, args=(events_cache, *ym), daemon=True).start()
 
-    Returns True if a fetch was started, False if already cached.
+
+def start_bg_fetch(events_cache, year, month, force=False):
+    """Fetch stale or missing month data without blocking the UI.
+
+    Returns True if a fetch is active or started, False if the cache is fresh.
     """
-    if (year, month) in events_cache:
-        return False
-    t = threading.Thread(
-        target=bg_fetch, args=(events_cache, year, month),
-        daemon=True,
-    )
-    t.start()
+    ym = (year, month)
+    with CACHE_LOCK:
+        if ym in _fetching:
+            if force:
+                _refetch.add(ym)
+            return True
+        if (not force and ym in events_cache
+                and time.monotonic() - _fetched_at.get(ym, 0) < CACHE_TTL):
+            return False
+        _fetching.add(ym)
+        _fetch_errors.discard(ym)
+        threading.Thread(
+            target=bg_fetch, args=(events_cache, year, month), daemon=True
+        ).start()
     return True
+
+
+def event_parts(event):
+    """Return normalized (id, calendar, time, title, all_day) data."""
+    return normalize_event(event) or (None, None, "", "", False)
 
 
 def draw_calendar(stdscr, year, month, events, selected_day, loading=False,
@@ -160,7 +276,7 @@ def draw_calendar(stdscr, year, month, events, selected_day, loading=False,
     cal = calendar.Calendar()
     month_days = cal.monthdays2calendar(year, month)
 
-    cell_w = max((width - 4) // 7, 10)
+    cell_w = max((width - 8) // 7, 6)
     cel_h = 3
 
     today = date.today()
@@ -228,7 +344,7 @@ def draw_calendar(stdscr, year, month, events, selected_day, loading=False,
                 if ev_y >= height - 1:
                     break
                 if ev_idx < len(day_events):
-                    ev_time, ev_title, is_all_day = day_events[ev_idx]
+                    _, _, ev_time, ev_title, is_all_day = event_parts(day_events[ev_idx])
                     if is_all_day:
                         color = C_EVENT_DOT
                         prefix = "■ "
@@ -310,7 +426,8 @@ def draw_detail(stdscr, year, month, events, selected_day, start_y):
             stdscr.attroff(curses.color_pair(C_HELP))
         return
 
-    for ev_time, ev_title, is_all_day in day_events:
+    for event in day_events:
+        _, _, ev_time, ev_title, is_all_day = event_parts(event)
         if line >= height - 1:
             break
         if is_all_day:
@@ -333,16 +450,16 @@ def read_line(stdscr, y, x, max_w):
     """Read a line of text with getch(). Returns string or None on Esc."""
     value = []
     while True:
-        key = stdscr.getch()
-        if key in (ord('\n'), ord('\r')):
+        key = stdscr.get_wch()
+        if key in ("\n", "\r", curses.KEY_ENTER):
             return "".join(value)
         if key == 27:  # Esc
             return None
-        if key in (127, curses.KEY_BACKSPACE, 8):
+        if key in ("\x7f", "\b", 127, curses.KEY_BACKSPACE, 8):
             if value:
                 value.pop()
-        elif 32 <= key <= 126 and len(value) < max_w:
-            value.append(chr(key))
+        elif isinstance(key, str) and key.isprintable() and len(value) < max_w:
+            value.append(key)
         else:
             continue  # skip redraw on unhandled keys
         display = "".join(value) + " " * (max_w - len(value))
@@ -359,7 +476,7 @@ def quick_add_prompt(stdscr, year, month, day):
 
     Shows the selected date, a hint line with example format, accepts natural
     language input, and appends the date for reliable placement.
-    Returns full text string or None on cancel.
+    Returns (display title, quick-add text) or None on cancel.
     """
     height, width = stdscr.getmaxyx()
 
@@ -400,9 +517,9 @@ def quick_add_prompt(stdscr, year, month, day):
 
     text = text.strip()
     month_abbr = calendar.month_abbr[month]
-    return f"{text} on {month_abbr} {day}"
+    return text, f"{text} on {month_abbr} {day}, {year}"
 
-def delete_event_prompt(stdscr, events, day, year, month, primary_cal=None):
+def delete_event_prompt(stdscr, events, day, year, month):
     """Prompt user to select an event on the given day to delete.
     Returns status string on attempt, or None if cancelled/no action."""
     day_events = events.get(day, [])
@@ -413,6 +530,7 @@ def delete_event_prompt(stdscr, events, day, year, month, primary_cal=None):
     y = min(height - 2, 18)
     x = 2
     max_w = max(width - x - len(prompt) - 4, 20)
+    selectable = min(len(day_events), 9, max_w, max(0, y - 1))
     stdscr.attron(curses.A_REVERSE)
     stdscr.addstr(y, 0, " " * width)
     stdscr.attroff(curses.A_REVERSE)
@@ -424,7 +542,8 @@ def delete_event_prompt(stdscr, events, day, year, month, primary_cal=None):
     curses.curs_set(2)
     # show list briefly above prompt
     list_y = y - 1
-    for idx, (_, title, _) in enumerate(day_events[:max_w]):
+    for idx, event in enumerate(day_events[:selectable]):
+        title = event_parts(event)[3]
         try:
             stdscr.addstr(list_y - idx, x, f"{idx+1}:{title[:max_w-3]}")
         except curses.error:
@@ -434,73 +553,93 @@ def delete_event_prompt(stdscr, events, day, year, month, primary_cal=None):
     key = stdscr.getch()
     curses.curs_set(0)
     stdscr.timeout(200)
-    if ord('1') <= key <= ord(str(min(9, len(day_events)))):
+    if selectable and ord('1') <= key <= ord(str(selectable)):
         idx = key - ord('1')
-        _, title, _ = day_events[idx]
-        # build gcalcli delete command
-        day_str = f"{year:04d}-{month:02d}-{day:02d}"
-        next_day = date(year, month, day) + timedelta(days=1)
-        end_str = next_day.strftime("%Y-%m-%d")
-        cmd = [GCALCLI, "--nocolor", "delete", "--iamaexpert"]
-        cal = primary_cal or _get_primary_cal()
-        if cal:
-            cmd += ["--calendar", cal]
-        cmd += [title, day_str, end_str]
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=15,
-                stdin=subprocess.DEVNULL,
-            )
-            if "Deleted!" in result.stdout:
-                return "✔ Deleted"
-            if result.stderr.strip():
-                return f"✗ {result.stderr.strip()[-40:]}"
-            return "✗ Delete failed"
-        except subprocess.TimeoutExpired:
-            return "✗ Timed out"
-        except Exception as e:
-            return f"✗ {e}"
+        event_id, calendar_name, _, _, _ = event_parts(day_events[idx])
+        if not event_id or not calendar_name:
+            return "Refresh calendar before deleting"
+        return calendar_name, event_id
     return None  # cancelled
 
 
-@functools.lru_cache(maxsize=1)
-def _get_primary_cal():
-    """Return the primary calendar email from gcalcli list (cached)."""
-    try:
-        r = subprocess.run(
-            [GCALCLI, "list", "--nocolor"],
-            capture_output=True, text=True, timeout=10,
-        )
-        for line in r.stdout.strip().split("\n"):
-            for tok in line.split():
-                if "@" in tok:
-                    return tok.strip()
-    except Exception:
-        pass
-    return None
+def _created_event_items(payload):
+    resource = payload["event"]
+    calendar_name = payload["calendar"]
+    start = resource["start"]
+    end = resource["end"]
+    all_day = "date" in start
+
+    if all_day:
+        start_date = date.fromisoformat(start["date"])
+        end_exclusive = date.fromisoformat(end["date"])
+        start_time = ""
+    else:
+        start_dt = datetime.fromisoformat(
+            start["dateTime"].replace("Z", "+00:00")
+        ).astimezone()
+        end_dt = datetime.fromisoformat(
+            end["dateTime"].replace("Z", "+00:00")
+        ).astimezone()
+        start_date = start_dt.date()
+        end_exclusive = end_dt.date()
+        if end_dt.strftime("%H:%M") != "00:00":
+            end_exclusive += timedelta(days=1)
+        start_time = start_dt.strftime("%H:%M")
+
+    if end_exclusive <= start_date:
+        end_exclusive = start_date + timedelta(days=1)
+    event = (resource["id"], calendar_name, start_time,
+             resource.get("summary", ""), all_day)
+    items = []
+    day = start_date
+    while day < end_exclusive:
+        items.append(((day.year, day.month), day.day, event))
+        day += timedelta(days=1)
+    return items
 
 
-def _quick_add_bg(cache, ym, text, result_list, calendar):
-    """Run gcalcli quick in a thread, store (success, msg) in result_list."""
+def _quick_add_bg(ym, text, result_list):
+    """Create an event asynchronously and return its API record."""
     try:
-        cmd = [GCALCLI, "quick", "--default-reminders"]
-        if calendar:
-            cmd += ["--calendar", calendar]
-        cmd.append(text)
         r = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30,
+            [str(GCALCLI_PYTHON), str(API_HELPER), "quick", text],
+            capture_output=True, text=True, timeout=30,
             stdin=subprocess.DEVNULL,
         )
         if r.returncode == 0:
-            if ym in cache:
-                del cache[ym]
-            result_list.append(("✓ Event created", C_EVENT))
+            result_list.append((True, "✓ Event created", C_EVENT, ym,
+                                json.loads(r.stdout)))
         else:
-            result_list.append((r.stderr.strip() or "✗ Failed", C_TODAY))
+            result_list.append((False, r.stderr.strip() or "✗ Failed",
+                                C_TODAY, ym, None))
     except subprocess.TimeoutExpired:
-        result_list.append(("✗ Timed out", C_TODAY))
+        result_list.append((False, "✗ Timed out", C_TODAY, ym, None))
     except (FileNotFoundError, OSError) as e:
-        result_list.append((f"✗ {e}", C_TODAY))
+        result_list.append((False, f"✗ {e}", C_TODAY, ym, None))
+    except (json.JSONDecodeError, TypeError) as e:
+        result_list.append((False, f"✗ Invalid event response: {e}", C_TODAY,
+                            ym, None))
+
+
+def _delete_event_bg(result_list, ym, calendar_name, event_id):
+    try:
+        if not GCALCLI_PYTHON.is_file():
+            raise FileNotFoundError("gcalcli pipx Python not found")
+        result = subprocess.run(
+            [str(GCALCLI_PYTHON), str(API_HELPER), "delete", calendar_name,
+             event_id],
+            capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode == 0:
+            result_list.append((True, "✔ Deleted", C_EVENT, ym, event_id))
+        else:
+            message = result.stderr.strip()[-40:] or "✗ Delete failed"
+            result_list.append((False, f"✗ {message}", C_TODAY, ym, event_id))
+    except subprocess.TimeoutExpired:
+        result_list.append((False, "✗ Timed out", C_TODAY, ym, event_id))
+    except (FileNotFoundError, OSError) as exc:
+        result_list.append((False, f"✗ {exc}", C_TODAY, ym, event_id))
 
 
 def main(stdscr):
@@ -545,29 +684,32 @@ def _main(stdscr):
     # Shared cache: (year, month) -> events dict
     disk_cache = load_cache()
     events_cache = {
-        _ym_from_key(k): {int(dk): dv for dk, dv in v.items()}
+        _ym_from_key(k): {int(dk): [tuple(e) for e in evs]
+                          for dk, evs in v.items()}
         for k, v in disk_cache.items()
     }
 
-    # ── Fire all fetches in background — show calendar immediately ──
+    # ── Refresh the current month in the background; retain cached view ──
     loading_ym = (year, month)
-    start_bg_fetch(events_cache, year, month)
-    for dy in [-1, 1]:
-        ny, nm = year, month + dy
-        if nm > 12:
-            nm, ny = 1, year + 1
-        elif nm < 1:
-            nm, ny = 12, year - 1
-        start_bg_fetch(events_cache, ny, nm)
+    start_bg_fetch(events_cache, year, month, force=True)
 
     # ── State ──
     spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     sp_idx = 0
     status_msg = None
     status_color = C_HELP
+    status_until = 0
     create_result = []  # list: thread stores (msg, color) here when done
-    creating_now = False  # True while gcalcli quick is running in bg
-    primary_cal = None  # fetched lazily on first 'n' press
+    creating_now = False  # True while the Calendar API request is running
+    pending_event = None
+    delete_result = []
+    deleting_now = False
+    pending_delete = None
+
+    def set_status(message, color):
+        nonlocal status_msg, status_color, status_until
+        status_msg, status_color = message, color
+        status_until = time.monotonic() + 2
 
     stdscr.timeout(200)
 
@@ -576,10 +718,16 @@ def _main(stdscr):
         stdscr.erase()
         height, width = stdscr.getmaxyx()
 
-        if height < 18 or width < 70:
-            msg = f"Terminal too small — need 70×18, got {width}×{height}"
-            stdscr.addstr(0, 0, msg)
-            stdscr.addstr(2, 0, "Resize terminal or press q to quit")
+        if height < 27 or width < 70:
+            msg = f"Terminal too small — need 70×27, got {width}×{height}"
+            try:
+                if height > 0 and width > 1:
+                    stdscr.addnstr(0, 0, msg, width - 1)
+                if height > 2 and width > 1:
+                    stdscr.addnstr(2, 0, "Resize terminal or press q to quit",
+                                   width - 1)
+            except curses.error:
+                pass
             stdscr.refresh()
             # Block until resize or quit (override main loop timeout)
             stdscr.timeout(-1)
@@ -588,7 +736,7 @@ def _main(stdscr):
                 if key == ord('q'):
                     return
                 h2, w2 = stdscr.getmaxyx()
-                if h2 >= 18 and w2 >= 70:
+                if h2 >= 27 and w2 >= 70:
                     height, width = h2, w2
                     break
             stdscr.timeout(200)
@@ -596,21 +744,71 @@ def _main(stdscr):
             continue
 
         # Check if background fetch completed
-        if loading_ym and loading_ym in events_cache:
+        with CACHE_LOCK:
+            loading = loading_ym in _fetching if loading_ym else False
+            failed = loading_ym in _fetch_errors if loading_ym else False
+            events = events_cache.get((year, month), {})
+        if pending_event and pending_event[0] == (year, month):
+            events = dict(events)
+            events[pending_event[1]] = [
+                *events.get(pending_event[1], []),
+                (None, None, "", f"Creating: {pending_event[2]}", False),
+            ]
+        if pending_delete and pending_delete[0] == (year, month):
+            _, event_id = pending_delete
+            events = {
+                day: [event for event in day_events
+                      if event_parts(event)[0] != event_id]
+                for day, day_events in events.items()
+            }
+        if loading_ym and not loading:
+            if failed:
+                set_status("Calendar sync failed — press r to retry", C_TODAY)
+                with CACHE_LOCK:
+                    _fetch_errors.discard(loading_ym)
             loading_ym = None
 
         # Check if quick-add completed
         if create_result:
-            status_msg, status_color = create_result.pop(0)
+            succeeded, message, color, changed_ym, payload = create_result.pop(0)
             creating_now = False
-            start_bg_fetch(events_cache, year, month)
-            disk = {_ym_key(*ym): ev for ym, ev in events_cache.items()}
-            save_cache(disk)
-            loading_ym = (year, month)
+            set_status(message, color)
+            pending_event = None
+            if succeeded:
+                try:
+                    with CACHE_LOCK:
+                        for event_ym, day, event in _created_event_items(payload):
+                            day_events = events_cache.setdefault(
+                                event_ym, {}).setdefault(day, [])
+                            if not any(event_parts(existing)[0] == event[0]
+                                       for existing in day_events):
+                                day_events.append(event)
+                        save_cache_snapshot(events_cache)
+                except (KeyError, OSError, TypeError, ValueError):
+                    set_status("Created; event could not be cached", C_TODAY)
+                if changed_ym == (year, month):
+                    with CACHE_LOCK:
+                        events = events_cache.get((year, month), {})
+            else:
+                if changed_ym == (year, month):
+                    with CACHE_LOCK:
+                        events = events_cache.get((year, month), {})
+
+        if delete_result:
+            succeeded, message, color, changed_ym, event_id = delete_result.pop(0)
+            deleting_now = False
+            pending_delete = None
+            set_status(message, color)
+            if succeeded:
+                with CACHE_LOCK:
+                    for day_events in events_cache.get(changed_ym, {}).values():
+                        day_events[:] = [event for event in day_events
+                                         if event_parts(event)[0] != event_id]
+                save_cache_snapshot(events_cache)
 
         is_loading = (loading_ym is not None)
-
-        events = events_cache.get((year, month), {})
+        if status_msg and time.monotonic() >= status_until:
+            status_msg = None
 
         # Clamp selected day
         max_day = calendar.monthrange(year, month)[1]
@@ -640,6 +838,13 @@ def _main(stdscr):
             except curses.error:
                 pass
             stdscr.attroff(curses.color_pair(C_HELP))
+        elif deleting_now:
+            stdscr.attron(curses.color_pair(C_HELP))
+            try:
+                stdscr.addstr(height - 1, 2, " ⟳ Deleting event...")
+            except curses.error:
+                pass
+            stdscr.attroff(curses.color_pair(C_HELP))
         elif is_loading:
             stdscr.attron(curses.color_pair(C_HELP))
             try:
@@ -659,6 +864,12 @@ def _main(stdscr):
         stdscr.refresh()
 
         # ── Input ──
+        if is_loading or creating_now or deleting_now:
+            stdscr.timeout(200)
+        elif status_msg:
+            stdscr.timeout(max(1, int((status_until - time.monotonic()) * 1000)))
+        else:
+            stdscr.timeout(-1)
         key = stdscr.getch()
 
         if key == -1:  # timeout — redraw spinner
@@ -677,43 +888,36 @@ def _main(stdscr):
                 loading_ym = (year, month)
 
         elif key == ord('r'):
-            if (year, month) in events_cache:
-                del events_cache[(year, month)]
-            disk = {_ym_key(*ym): ev for ym, ev in events_cache.items()}
-            save_cache(disk)
-            start_bg_fetch(events_cache, year, month)
+            start_bg_fetch(events_cache, year, month, force=True)
             loading_ym = (year, month)
 
-        elif key == ord('n') and not creating_now:
-            # quick add new event — lazy fetch primary calendar
-            if primary_cal is None:
-                primary_cal = _get_primary_cal()
-            raw = quick_add_prompt(stdscr, year, month, selected_day)
-            if raw:
+        elif key == ord('n') and not creating_now and not deleting_now:
+            # Prompt immediately; calendar lookup and creation run in background.
+            event_input = quick_add_prompt(stdscr, year, month, selected_day)
+            if event_input:
+                title, raw = event_input
                 creating_now = True
+                pending_event = ((year, month), selected_day, title)
                 t = threading.Thread(
                     target=_quick_add_bg,
-                    args=(events_cache, (year, month), raw, create_result,
-                          primary_cal),
+                    args=((year, month), raw, create_result),
                     daemon=True,
                 )
                 t.start()
-        elif key == ord('d'):
+        elif key == ord('d') and not deleting_now and not creating_now:
             # delete selected event if any
             del_msg = delete_event_prompt(stdscr, events, selected_day,
-                                          year, month, primary_cal)
-            if del_msg and del_msg.startswith("✔"):
-                status_msg = del_msg
-                status_color = C_EVENT
-                if (year, month) in events_cache:
-                    del events_cache[(year, month)]
-                disk = {_ym_key(*ym): ev for ym, ev in events_cache.items()}
-                save_cache(disk)
-                start_bg_fetch(events_cache, year, month)
-                loading_ym = (year, month)
+                                          year, month)
+            if isinstance(del_msg, tuple):
+                deleting_now = True
+                pending_delete = ((year, month), del_msg[1])
+                threading.Thread(
+                    target=_delete_event_bg,
+                    args=(delete_result, (year, month), *del_msg),
+                    daemon=True,
+                ).start()
             elif del_msg:
-                status_msg = del_msg
-                status_color = C_TODAY
+                set_status(del_msg, C_TODAY)
 
         elif key == curses.KEY_LEFT:
             month -= 1
@@ -734,13 +938,13 @@ def _main(stdscr):
                 loading_ym = (year, month)
 
         elif key == curses.KEY_UP:
-            d = date(year, month, selected_day) + timedelta(days=1)
+            d = date(year, month, selected_day) - timedelta(days=1)
             year, month, selected_day = d.year, d.month, d.day
             if start_bg_fetch(events_cache, year, month):
                 loading_ym = (year, month)
 
         elif key == curses.KEY_DOWN:
-            d = date(year, month, selected_day) - timedelta(days=1)
+            d = date(year, month, selected_day) + timedelta(days=1)
             year, month, selected_day = d.year, d.month, d.day
             if start_bg_fetch(events_cache, year, month):
                 loading_ym = (year, month)

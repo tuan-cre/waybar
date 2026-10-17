@@ -9,9 +9,17 @@ waybar-vis: waybar-vis.o fft.o
 waybar-vis.o: waybar-vis.c fft.h
 fft.o: fft.c fft.h
 
+fft-test: fft_test.o fft.o
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+test: fft-test
+	./fft-test
+
 clean:
-	rm -f waybar-vis *.o
+	rm -f waybar-vis fft-test *.o
 
 install: waybar-vis
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 waybar-vis $(DESTDIR)$(PREFIX)/bin
+
+.PHONY: clean install test

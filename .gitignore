@@ -28,11 +28,14 @@ Thumbs.db
 .vscode/
 
 # Waybar / Hyprland
+openrouter.env
 # Playwright MCP dumps
 scripts/.playwright-mcp/
 tools/*/__pycache__/
 tools/*/.venv/
 tools/wifi/.diskcache/
+tools/vis/*.o
+tools/vis/fft-test
 
 # Logs
 *.log

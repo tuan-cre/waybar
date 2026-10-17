@@ -61,7 +61,7 @@ See `battery_tui.py:72` (simple), `daemons_tui.py:266` (tabs+search), `gcal_tui.
 # _click.sh
 TUI="$HOME/.config/waybar/tools/mytool/mytool_tui.py"
 foot --title="mytool" --window-size-chars=85x30 -- python3 "$TUI"
-pkill -RTMIN+1 waybar
+  pkill -RTMIN+1 -x waybar  # -x: exact match, or you also kill waybar-vis (RTMIN default-kills it)
 # config
 "custom/mytool": { "exec": "mytool_waybar.sh", "return-type": "json", "on-click": "mytool_click.sh" }
 ```
