@@ -10,13 +10,22 @@ emit() { # $1=text $2=tooltip $3=class $4=pct
     '{text: $t, tooltip: $tip, class: $c, percentage: $p}'
 }
 
+tmp=$(mktemp "${TMPDIR:-/tmp}/waybar-or.XXXXXX") || exit 0
+trap 'rm -f "$tmp"' EXIT
+
+# Check connectivity before the key so an offline session doesn't look like a
+# configuration error. The request itself is the connectivity check when a key
+# is available; otherwise use curl against the API host without credentials.
 if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  online=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' https://openrouter.ai 2>/dev/null)
+  if [ "$online" = "000" ]; then
+    jq -nc '{text: "", tooltip: "offline", class: "hidden"}'
+    exit 0
+  fi
   emit "OR err" "OPENROUTER_API_KEY is not set" "error"
   exit 0
 fi
 
-tmp=$(mktemp "${TMPDIR:-/tmp}/waybar-or.XXXXXX") || exit 0
-trap 'rm -f "$tmp"' EXIT
 resp=$(curl -s --max-time 10 -o "$tmp" -w '%{http_code}' \
   -H "Authorization: Bearer $OPENROUTER_API_KEY" https://openrouter.ai/api/v1/key 2>/dev/null)
 if [ "$resp" = "000" ]; then
