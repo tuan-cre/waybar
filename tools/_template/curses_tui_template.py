@@ -7,7 +7,7 @@ Usage:
   # Optionally: draw_detail(), tabs, form dialogs
 
 Theme: Void vibe — magenta accent #b48ead, border #5c5c6e, green #a3be8c,
-       red #bf616a, blue #81a1c1. See style.css and wifitui.py for ref.
+       red #bf616a, blue #81a1c1. See style.css and wifi/ui/app.py for ref.
 """
 import curses
 import json
