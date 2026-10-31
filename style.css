@@ -19,11 +19,14 @@
 #custom-memory,
 #cpu,
 #clock,
+#custom-singapore,
 #custom-gcal,
 #custom-audacious,
 #custom-vis,
 #custom-daemons,
 #custom-openrouter,
+#custom-vpn,
+#custom-bluetooth,
 #tray,
 #network,
 #pulseaudio,
@@ -58,11 +61,14 @@
 #custom-memory:hover,
 #cpu:hover,
 #clock:hover,
+#custom-singapore:hover,
 #custom-gcal:hover,
 #custom-audacious:hover,
 #custom-vis:hover,
 #custom-daemons:hover,
 #custom-openrouter:hover,
+#custom-vpn:hover,
+#custom-bluetooth:hover,
 #network:hover,
 #pulseaudio:hover,
 #battery:hover {
@@ -77,6 +83,9 @@
 }
 
 /* === State colors (differ from base text) === */
+#custom-singapore { color: #5c5c6e; }
+#custom-singapore.office { color: #a3be8c; }
+#custom-singapore.lunch { color: #ebcb8b; }
 #custom-gcal.not-configured { color: #5c5c6e; }
 #custom-gcal.error { color: #bf616a; }
 #custom-openrouter.warning { color: #ebcb8b; }
@@ -92,6 +101,17 @@
   border: none;
 }
 #network.disconnected { color: #5c5c6e; }
+#custom-vpn.active { color: #a3be8c; }
+#custom-bluetooth.off { color: #5c5c6e; }
+#custom-bluetooth.connected { color: #a3be8c; }#custom-vpn.hidden {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  font-size: 0;
+  opacity: 0;
+  border: none;
+}
 
 /* === Visualizer === */
 #custom-vis {

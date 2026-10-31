@@ -15,6 +15,7 @@
 
   "modules-center": [
     "clock",
+//    "custom/singapore",
     "custom/gcal",
     "custom/openrouter"
   ],
@@ -24,6 +25,8 @@
     "custom/vis",
     "custom/daemons",
     "tray",
+    "custom/vpn",
+    "custom/bluetooth",
     "network",
     "pulseaudio",
     "battery"
@@ -47,6 +50,13 @@
     "on-click": "~/.config/waybar/tools/gcal/gcal_click.sh left"
   },
 
+  "custom/singapore": {
+    "exec": "~/.config/waybar/scripts/singapore.sh",
+    "interval": 1,
+    "return-type": "json",
+    "tooltip": true
+  },
+
   "custom/gcal": {
     "exec": "~/.config/waybar/tools/gcal/gcal.sh",
     "interval": 300,
@@ -55,6 +65,26 @@
     "on-click": "~/.config/waybar/tools/gcal/gcal_click.sh left",
     "on-click-right": "~/.config/waybar/tools/gcal/gcal_click.sh right",
     "on-click-middle": "~/.config/waybar/tools/gcal/gcal_click.sh middle"
+  },
+
+  "custom/vpn": {
+    "exec": "~/.config/waybar/scripts/vpn_status.py",
+    "interval": 5,
+    "return-type": "json",
+    "tooltip": true,
+    "signal": 8,
+    "on-click": "footclient -E --app-id=wifi-tui -e ~/.config/waybar/tools/wifi/.venv/bin/python ~/.config/waybar/tools/wifi/wifitui_curses.py",
+    "on-click-right": "~/.config/waybar/scripts/vpn_status.py --disconnect"
+  },
+
+  "custom/bluetooth": {
+    "exec": "~/.config/waybar/scripts/bluetooth_status.sh",
+    "interval": 5,
+    "signal": 9,
+    "return-type": "json",
+    "tooltip": true,
+    "on-click": "blueman-manager",
+    "on-click-right": "~/.config/waybar/scripts/bluetooth_toggle.sh"
   },
 
   "network": {
